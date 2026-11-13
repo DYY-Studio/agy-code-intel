@@ -831,16 +831,6 @@ class LspManager:
         session.ensure_file_synced(resolved)
         return session
 
-    def get_session_for_workspace(self, workspace_path: Path, lang_key: str) -> LspSession:
-        ws_root = workspace_path.expanduser().resolve()
-        if not ws_root.is_dir():
-            raise FileNotFoundError(f"Workspace directory does not exist: {ws_root}")
-        matched = next((s for s in LANGUAGE_SPECS if s.lang_key == lang_key), None)
-        if matched is None:
-            valid = ", ".join(s.lang_key for s in LANGUAGE_SPECS)
-            raise LspUnavailableError(f"Unsupported language {lang_key!r}. Supported: {valid}")
-        return self._get_or_start(ws_root, matched)
-
     def _get_or_start(self, ws_root: Path, spec: LanguageSpec) -> LspSession:
         self._evict_idle()
         key = (ws_root, spec.lang_key)
