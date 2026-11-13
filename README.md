@@ -14,7 +14,7 @@ Unlike raw `rg` text searches—which miss aliased imports, polymorphic method r
 
 2. **Zero Workspace Pollution & Automatic Sync**:
    - Pure Python 3 standard library implementation; writes **zero** dot-directories or cache files into target repositories.
-   - Automatically detects workspace roots, Python `.venv` interpreters, global `tsserver.js` fallback paths, and unconfigured `.mjs`/`.js` repositories.
+   - Automatically detects workspace roots, nested/root Python `.venv` interpreters (or accepts an explicit `python_path` venv/interpreter override for multi-venv plugin architectures, with LRU session isolation and `python=...` header echo), global `tsserver.js` fallback paths, and unconfigured `.mjs`/`.js` repositories.
    - Tracks open document `(mtime_ns, size)` on disk so edits made mid-session immediately sync via `textDocument/didChange`, and evicts idle LSP subprocesses after 10 minutes.
    - **No silent fallbacks**: missing language servers or unsupported LSP capabilities are reported explicitly.
 

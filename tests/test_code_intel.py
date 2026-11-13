@@ -11,10 +11,36 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from lsp_manager import path_to_uri, py_col_to_utf16, uri_to_path, utf16_to_py_col
+from lsp_manager import (
+    path_to_uri,
+    py_col_to_utf16,
+    resolve_python_interpreter,
+    uri_to_path,
+    utf16_to_py_col,
+)
 
 
 class UnitHelpersTest(unittest.TestCase):
+    def test_python_interpreter_resolution_and_validation(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="code_intel_venv_") as tmp:
+            ws = Path(tmp).resolve()
+            sub_py = ws / "plugins" / "ocr" / ".venv" / "bin" / "python"
+            sub_py.parent.mkdir(parents=True)
+            sub_py.symlink_to(sys.executable)
+            target = ws / "plugins" / "ocr" / "worker.py"
+            target.write_text("x = 1\n", encoding="utf-8")
+
+            # Preserves symlink path inside sub-plugin .venv rather than dereferencing to system python
+            auto_py = resolve_python_interpreter(ws, None, target)
+            self.assertEqual(auto_py, sub_py)
+            # Explicit venv directory resolves to bin/python inside it
+            self.assertEqual(resolve_python_interpreter(ws, str(sub_py.parent.parent)), sub_py)
+            # Rejects non-python executable names
+            bad = ws / "not_python.sh"
+            bad.write_text("#!/bin/sh\n", encoding="utf-8")
+            bad.chmod(0o755)
+            with self.assertRaises(ValueError):
+                resolve_python_interpreter(ws, str(bad))
     def test_utf16_column_roundtrip_with_cjk_and_emoji(self) -> None:
         line = 'prefix = "中文😀" + target_fn(x)'
         py_idx = line.index("target_fn")

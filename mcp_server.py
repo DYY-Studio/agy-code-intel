@@ -458,6 +458,18 @@ def _format_warnings(session: LspSession) -> list[str]:
     return [f"[Warning] {w}" for w in dict.fromkeys(session.warnings)]
 
 
+def _python_env_tag(session: LspSession) -> str:
+    if session.spec.lang_key != "python":
+        return ""
+    if session.python_path is None:
+        return ", python=default"
+    py_str = str(session.python_path)
+    ws_prefix = str(session.workspace_root) + os.sep
+    if py_str.startswith(ws_prefix):
+        py_str = py_str[len(ws_prefix) :]
+    return f", python={py_str}"
+
+
 def tool_locate_symbol(args: dict[str, Any]) -> str:
     symbol = _str_arg(args, "symbol")
     if not symbol:
@@ -465,6 +477,7 @@ def tool_locate_symbol(args: dict[str, Any]) -> str:
     file_arg = _str_arg(args, "file")
     workspace_arg = _str_arg(args, "workspace")
     language_arg = _str_arg(args, "language")
+    python_path_arg = _str_arg(args, "python_path")
     limit = _int_arg(args, "limit", default=30, min_val=1, max_val=200) or 30
 
     line_cache: dict[Path, list[str]] = {}
@@ -473,7 +486,7 @@ def tool_locate_symbol(args: dict[str, Any]) -> str:
 
     if file_arg:
         fpath = Path(file_arg).expanduser().resolve()
-        session = MANAGER.get_session_for_file(fpath, workspace_arg)
+        session = MANAGER.get_session_for_file(fpath, workspace_arg, python_path_arg)
         doc_syms = _fetch_document_symbols(session, fpath, sym_cache)
         exact: list[FlatSymbol] = []
         partial: list[FlatSymbol] = []
@@ -490,7 +503,7 @@ def tool_locate_symbol(args: dict[str, Any]) -> str:
 
         lines_out.append(
             f"Symbols matching {symbol!r} in {_display_path(fpath, session.workspace_root)} "
-            f"(server={session.server_name}, count={len(matches)}):"
+            f"(server={session.server_name}{_python_env_tag(session)}, count={len(matches)}):"
         )
         for s in matches:
             kind_label = SYMBOL_KINDS.get(s.kind, f"Kind({s.kind})")
@@ -516,14 +529,18 @@ def tool_locate_symbol(args: dict[str, Any]) -> str:
 
     for lang_key, sample_file in samples.items():
         try:
-            session = MANAGER.get_session_for_file(sample_file, str(ws_root))
+            session = MANAGER.get_session_for_file(
+                sample_file,
+                str(ws_root),
+                python_path_arg if lang_key == "python" else None,
+            )
         except LspUnavailableError as exc:
             if language_arg:
                 raise
             unavailable_errors.append(str(exc))
             continue
 
-        active_servers.append(session.server_name)
+        active_servers.append(f"{session.server_name}{_python_env_tag(session)}")
         warnings_out.extend(_format_warnings(session))
         raw = session.request("workspace/symbol", {"query": symbol.split(".")[-1].strip()}, timeout=20.0)
         if not isinstance(raw, list):
@@ -599,9 +616,10 @@ def tool_find_callers(args: dict[str, Any]) -> str:
     depth = _int_arg(args, "depth", default=1, min_val=1, max_val=5) or 1
     include_non_call_refs = _bool_arg(args, "include_non_call_refs", default=True)
     workspace_arg = _str_arg(args, "workspace")
+    python_path_arg = _str_arg(args, "python_path")
 
     fpath = Path(file_arg).expanduser().resolve()
-    session = MANAGER.get_session_for_file(fpath, workspace_arg)
+    session = MANAGER.get_session_for_file(fpath, workspace_arg, python_path_arg)
 
     line_cache: dict[Path, list[str]] = {}
     sym_cache: dict[Path, list[FlatSymbol]] = {}
@@ -613,7 +631,7 @@ def tool_find_callers(args: dict[str, Any]) -> str:
     rel_target = _display_path(fpath, session.workspace_root)
     lines_out.append(
         f"Target: {resolved_label} ({rel_target}:{l0 + 1}:{c0 + 1}) "
-        f"[server={session.server_name}, workspace={session.workspace_root.name}, depth={depth}]"
+        f"[server={session.server_name}{_python_env_tag(session)}, workspace={session.workspace_root.name}, depth={depth}]"
     )
 
     covered_call_sites: set[tuple[Path, int]] = {(fpath, l0)}
@@ -753,9 +771,10 @@ def tool_find_callees(args: dict[str, Any]) -> str:
     depth = _int_arg(args, "depth", default=1, min_val=1, max_val=5) or 1
     include_external = _bool_arg(args, "include_external", default=False)
     workspace_arg = _str_arg(args, "workspace")
+    python_path_arg = _str_arg(args, "python_path")
 
     fpath = Path(file_arg).expanduser().resolve()
-    session = MANAGER.get_session_for_file(fpath, workspace_arg)
+    session = MANAGER.get_session_for_file(fpath, workspace_arg, python_path_arg)
     if not session.supports_call_hierarchy():
         raise LspUnavailableError(
             f"{session.server_name} does not advertise callHierarchyProvider; outgoing callee tracing is unavailable."
@@ -776,7 +795,7 @@ def tool_find_callees(args: dict[str, Any]) -> str:
     rel_target = _display_path(fpath, session.workspace_root)
     lines_out.append(
         f"Target: {resolved_label} ({rel_target}:{l0 + 1}:{c0 + 1}) "
-        f"[server={session.server_name}, workspace={session.workspace_root.name}, depth={depth}]"
+        f"[server={session.server_name}{_python_env_tag(session)}, workspace={session.workspace_root.name}, depth={depth}]"
     )
 
     visited: set[tuple[Path, int, int, str]] = {_item_key(it) for it in root_items}
@@ -856,9 +875,10 @@ def tool_find_implementations(args: dict[str, Any]) -> str:
     line_1based = _int_arg(args, "line", default=None, min_val=1)
     col_1based = _int_arg(args, "column", default=None, min_val=1)
     workspace_arg = _str_arg(args, "workspace")
+    python_path_arg = _str_arg(args, "python_path")
 
     fpath = Path(file_arg).expanduser().resolve()
-    session = MANAGER.get_session_for_file(fpath, workspace_arg)
+    session = MANAGER.get_session_for_file(fpath, workspace_arg, python_path_arg)
 
     line_cache: dict[Path, list[str]] = {}
     sym_cache: dict[Path, list[FlatSymbol]] = {}
@@ -893,7 +913,7 @@ def tool_find_implementations(args: dict[str, Any]) -> str:
     rel_target = _display_path(fpath, session.workspace_root)
     lines_out.append(
         f"Implementations of {resolved_label} ({rel_target}:{l0 + 1}:{c0 + 1}) "
-        f"[server={session.server_name}, count={len(locs)}]:"
+        f"[server={session.server_name}{_python_env_tag(session)}, count={len(locs)}]:"
     )
     if not locs:
         lines_out.append("  (none)")
@@ -939,6 +959,10 @@ TOOLS: list[dict[str, Any]] = [
                     "type": "string",
                     "enum": ["python", "typescript", "go", "rust", "cpp", "swift"],
                     "description": "Optional language filter for workspace-wide symbol search.",
+                },
+                "python_path": {
+                    "type": "string",
+                    "description": "Optional Python interpreter or virtualenv directory override for multi-venv/plugin workspaces.",
                 },
                 "limit": {
                     "type": "integer",
@@ -987,6 +1011,10 @@ TOOLS: list[dict[str, Any]] = [
                     "type": "string",
                     "description": "Optional workspace root directory override.",
                 },
+                "python_path": {
+                    "type": "string",
+                    "description": "Optional Python interpreter or virtualenv directory override for multi-venv/plugin workspaces.",
+                },
             },
             "required": ["file"],
         },
@@ -1028,6 +1056,10 @@ TOOLS: list[dict[str, Any]] = [
                     "type": "string",
                     "description": "Optional workspace root directory override.",
                 },
+                "python_path": {
+                    "type": "string",
+                    "description": "Optional Python interpreter or virtualenv directory override for multi-venv/plugin workspaces.",
+                },
             },
             "required": ["file"],
         },
@@ -1060,6 +1092,10 @@ TOOLS: list[dict[str, Any]] = [
                 "workspace": {
                     "type": "string",
                     "description": "Optional workspace root directory override.",
+                },
+                "python_path": {
+                    "type": "string",
+                    "description": "Optional Python interpreter or virtualenv directory override for multi-venv/plugin workspaces.",
                 },
             },
             "required": ["file"],

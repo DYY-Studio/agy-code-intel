@@ -16,6 +16,7 @@ from typing import Any
 from urllib.parse import unquote, urlparse
 
 IDLE_TIMEOUT_SEC = 600.0
+MAX_SESSIONS_PER_WORKSPACE_LANG = 3
 MAX_PREOPEN_JS_FILES = 80
 MAX_PREOPEN_FILE_BYTES = 512 * 1024
 SKIP_DIRS = frozenset({
@@ -208,28 +209,66 @@ def detect_workspace_root(target: Path, spec: LanguageSpec, explicit_workspace: 
     return start_dir
 
 
-def _find_python_interpreter(workspace_root: Path) -> Path | None:
+def resolve_python_interpreter(
+    workspace_root: Path,
+    explicit_python_path: str | None = None,
+    target_file: Path | None = None,
+) -> Path | None:
+    """Resolve Python interpreter or venv directory without dereferencing venv bin/python symlinks."""
+    if explicit_python_path:
+        raw = Path(os.path.abspath(os.path.expanduser(explicit_python_path.strip())))
+        if raw.is_dir():
+            for rel in (("bin", "python"), ("bin", "python3"), ("Scripts", "python.exe"), ("python.exe",)):
+                cand = Path(os.path.abspath(raw.joinpath(*rel)))
+                if cand.is_file() and os.access(cand, os.X_OK):
+                    return cand
+            raise ValueError(f"No executable Python interpreter found inside directory: {raw}")
+        if not raw.is_file() or not os.access(raw, os.X_OK):
+            raise ValueError(f"Python interpreter does not exist or is not executable: {raw}")
+        if not re.match(r"^python(\d+(\.\d+)*)?(\.exe)?$", raw.name, re.IGNORECASE):
+            raise ValueError(f"Invalid python_path executable name {raw.name!r} (expected python/python3): {raw}")
+        return raw
+
     rel_candidates = (
         (".venv", "bin", "python"),
         ("venv", "bin", "python"),
         (".venv", "Scripts", "python.exe"),
         ("venv", "Scripts", "python.exe"),
     )
-    search_roots = [workspace_root]
-    if workspace_root.parent != workspace_root and _same_mount(workspace_root.parent, workspace_root):
-        search_roots.append(workspace_root.parent)
+    search_roots: list[Path] = []
+    ws_resolved = workspace_root.resolve()
+    if target_file is not None:
+        cur = target_file.resolve().parent
+        while True:
+            search_roots.append(cur)
+            if cur == ws_resolved or cur.parent == cur or not _same_mount(cur.parent, cur):
+                break
+            try:
+                cur.relative_to(ws_resolved)
+            except ValueError:
+                break
+            cur = cur.parent
+
+    if ws_resolved not in search_roots:
+        search_roots.append(ws_resolved)
+    if ws_resolved.parent != ws_resolved and _same_mount(ws_resolved.parent, ws_resolved):
+        search_roots.append(ws_resolved.parent)
+
     for root in search_roots:
         for parts in rel_candidates:
-            candidate = root.joinpath(*parts)
+            candidate = Path(os.path.abspath(root.joinpath(*parts)))
             if candidate.is_file() and os.access(candidate, os.X_OK):
-                return candidate.resolve()
+                return candidate
     return None
 
 
-def _build_augmented_env(workspace_root: Path) -> dict[str, str]:
+def _build_augmented_env(workspace_root: Path, python_path: Path | None = None) -> dict[str, str]:
     env = dict(os.environ)
     home = Path.home()
-    extra_dirs: list[Path] = [
+    extra_dirs: list[Path] = []
+    if python_path is not None:
+        extra_dirs.append(python_path.parent)
+    extra_dirs.extend([
         workspace_root / ".venv" / "bin",
         workspace_root / "venv" / "bin",
         workspace_root / ".venv" / "Scripts",
@@ -238,7 +277,7 @@ def _build_augmented_env(workspace_root: Path) -> dict[str, str]:
         Path("/usr/local/bin"),
         home / "go" / "bin",
         home / ".cargo" / "bin",
-    ]
+    ])
     gopath = env.get("GOPATH")
     if gopath:
         extra_dirs.append(Path(gopath) / "bin")
@@ -341,13 +380,18 @@ class _OpenDocState:
 class LspSession:
     """Manages a single language server child process over stdio JSON-RPC."""
 
-    def __init__(self, spec: LanguageSpec, workspace_root: Path) -> None:
+    def __init__(
+        self,
+        spec: LanguageSpec,
+        workspace_root: Path,
+        python_path: Path | None = None,
+    ) -> None:
         self.spec = spec
         self.workspace_root = workspace_root.resolve()
-        self.env = _build_augmented_env(self.workspace_root)
+        self.python_path = python_path if spec.lang_key == "python" else None
+        self.env = _build_augmented_env(self.workspace_root, self.python_path)
         self.cmd = _resolve_lsp_command(spec, self.workspace_root, self.env)
         self.server_name = Path(self.cmd[0]).name
-        self.python_path = _find_python_interpreter(self.workspace_root) if spec.lang_key == "python" else None
 
         self._proc: subprocess.Popen[bytes] | None = None
         self._write_lock = threading.Lock()
@@ -813,27 +857,38 @@ class LspSession:
 
 
 class LspManager:
-    """Pool of lazy-started, idle-evicted LSP sessions keyed by (workspace_root, lang_key)."""
+    """Pool of lazy-started, idle-evicted LSP sessions keyed by (workspace_root, lang_key, python_path)."""
 
     def __init__(self, idle_timeout_sec: float = IDLE_TIMEOUT_SEC) -> None:
         self.idle_timeout_sec = idle_timeout_sec
-        self._sessions: dict[tuple[Path, str], LspSession] = {}
+        self._sessions: dict[tuple[Path, str, Path | None], LspSession] = {}
         self._lock = threading.Lock()
         atexit.register(self.close_all)
 
-    def get_session_for_file(self, file_path: Path, explicit_workspace: str | None = None) -> LspSession:
+    def get_session_for_file(
+        self,
+        file_path: Path,
+        explicit_workspace: str | None = None,
+        explicit_python_path: str | None = None,
+    ) -> LspSession:
         resolved = file_path.expanduser().resolve()
         if not resolved.is_file():
             raise FileNotFoundError(f"Target file does not exist: {resolved}")
         spec = spec_for_file(resolved)
         ws_root = detect_workspace_root(resolved, spec, explicit_workspace)
-        session = self._get_or_start(ws_root, spec)
+        py_path = (
+            resolve_python_interpreter(ws_root, explicit_python_path, resolved)
+            if spec.lang_key == "python"
+            else None
+        )
+        session = self._get_or_start(ws_root, spec, py_path)
         session.ensure_file_synced(resolved)
         return session
 
-    def _get_or_start(self, ws_root: Path, spec: LanguageSpec) -> LspSession:
+    def _get_or_start(self, ws_root: Path, spec: LanguageSpec, py_path: Path | None = None) -> LspSession:
         self._evict_idle()
-        key = (ws_root, spec.lang_key)
+        key = (ws_root, spec.lang_key, py_path)
+        evicted_lru: list[LspSession] = []
         with self._lock:
             existing = self._sessions.get(key)
             if existing is not None and existing.is_alive():
@@ -841,8 +896,21 @@ class LspManager:
                 return existing
             if existing is not None:
                 self._sessions.pop(key, None)
-            session = LspSession(spec, ws_root)
+
+            same_ws_lang = [
+                (k, s) for k, s in self._sessions.items() if k[0] == ws_root and k[1] == spec.lang_key
+            ]
+            if len(same_ws_lang) >= MAX_SESSIONS_PER_WORKSPACE_LANG:
+                same_ws_lang.sort(key=lambda pair: pair[1].last_used)
+                for old_key, old_sess in same_ws_lang[: len(same_ws_lang) - MAX_SESSIONS_PER_WORKSPACE_LANG + 1]:
+                    self._sessions.pop(old_key, None)
+                    evicted_lru.append(old_sess)
+
+            session = LspSession(spec, ws_root, python_path=py_path)
             self._sessions[key] = session
+
+        for old_sess in evicted_lru:
+            old_sess.close()
 
         try:
             session.start()
