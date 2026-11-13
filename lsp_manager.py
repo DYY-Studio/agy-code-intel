@@ -62,7 +62,7 @@ LANGUAGE_SPECS: tuple[LanguageSpec, ...] = (
             ("vtsls", ("--stdio",)),
         ),
         root_markers=("tsconfig.json", "jsconfig.json", "package.json"),
-        install_hint="npm install -g typescript typescript-language-server",
+        install_hint="npm install -g 'typescript@^6' typescript-language-server",
     ),
     LanguageSpec(
         lang_key="go",
@@ -300,6 +300,36 @@ def _resolve_lsp_command(spec: LanguageSpec, workspace_root: Path, env: dict[str
     )
 
 
+def _find_fallback_tsserver(lsp_executable: str, env: dict[str, str]) -> str | None:
+    candidates: list[Path] = []
+    try:
+        resolved_bin = Path(lsp_executable).resolve()
+        # e.g. <prefix>/lib/node_modules/typescript-language-server/lib/cli.mjs
+        for ancestor in resolved_bin.parents:
+            if ancestor.name == "node_modules":
+                candidates.append(ancestor / "typescript" / "lib" / "tsserver.js")
+                break
+    except OSError:
+        pass
+
+    tsc_bin = shutil.which("tsc", path=env.get("PATH", ""))
+    if tsc_bin:
+        try:
+            tsc_resolved = Path(tsc_bin).resolve()
+            candidates.append(tsc_resolved.parent.parent / "lib" / "tsserver.js")
+        except OSError:
+            pass
+
+    candidates.extend([
+        Path("/opt/homebrew/lib/node_modules/typescript/lib/tsserver.js"),
+        Path("/usr/local/lib/node_modules/typescript/lib/tsserver.js"),
+    ])
+    for cand in candidates:
+        if cand.is_file():
+            return str(cand)
+    return None
+
+
 @dataclass
 class _OpenDocState:
     mtime_ns: int
@@ -397,6 +427,9 @@ class LspSession:
                 init_options["python"] = {"pythonPath": str(self.python_path)}
         elif self.spec.lang_key == "typescript":
             init_options = {"disableAutomaticTypingAcquisition": True}
+            fb_tsserver = _find_fallback_tsserver(self.cmd[0], self.env)
+            if fb_tsserver:
+                init_options["tsserver"] = {"fallbackPath": fb_tsserver}
 
         return {
             "processId": os.getpid(),
