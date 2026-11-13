@@ -1,0 +1,12 @@
+{
+  "name": "code-intel",
+  "displayName": "Code Intelligence",
+  "description": "LSP-backed semantic symbol navigation and call-graph MCP server: locate symbols, trace incoming callers (including non-call references), outgoing callees, and interface implementations across Python, TypeScript/JavaScript, Go, Rust, C/C++, and Swift.",
+  "version": "1.0.0",
+  "logo": "assets/logo.svg",
+  "suggestedPrompts": [
+    "Find all callers and non-call references of a function before changing its signature",
+    "Trace the 2-hop upstream call chain of a symbol to assess refactoring impact",
+    "List all concrete implementations of an interface, protocol, or base method"
+  ]
+}
