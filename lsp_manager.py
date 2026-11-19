@@ -63,7 +63,7 @@ LANGUAGE_SPECS: tuple[LanguageSpec, ...] = (
             ("vtsls", ("--stdio",)),
         ),
         root_markers=("tsconfig.json", "jsconfig.json", "package.json"),
-        install_hint="npm install -g 'typescript@^6' typescript-language-server",
+        install_hint='npm install -g "typescript@^6" typescript-language-server',
     ),
     LanguageSpec(
         lang_key="go",
@@ -84,14 +84,14 @@ LANGUAGE_SPECS: tuple[LanguageSpec, ...] = (
         extensions=(".c", ".h", ".cc", ".cpp", ".cxx", ".hpp", ".hh"),
         candidates=(("clangd", ("--background-index",)),),
         root_markers=("compile_commands.json", "compile_flags.txt", "CMakeLists.txt"),
-        install_hint="Install clangd via Xcode Command Line Tools or brew install llvm",
+        install_hint="Install clangd (macOS: Xcode CLT / brew install llvm; Linux: apt/dnf install clangd; Windows: winget install LLVM.LLVM)",
     ),
     LanguageSpec(
         lang_key="swift",
         extensions=(".swift",),
         candidates=(("sourcekit-lsp", ()),),
         root_markers=("Package.swift",),
-        install_hint="Install Xcode or Swift toolchain (sourcekit-lsp)",
+        install_hint="Install Swift toolchain (sourcekit-lsp)",
     ),
 )
 
@@ -104,15 +104,29 @@ def path_to_uri(path: Path) -> str:
     return path.resolve().as_uri()
 
 
+_URI_SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]+:")
+
+
+def is_file_uri_or_path(uri: str) -> bool:
+    """Return True if uri is a file: URI or a local filesystem path (not a virtual URI like untitled:/deno:)."""
+    s = str(uri or "").strip()
+    if not s:
+        return False
+    if s.lower().startswith("file:"):
+        return True
+    # Single-letter prefix like C:\... is a Windows drive path, not a URI scheme.
+    return _URI_SCHEME_RE.match(s) is None
+
+
 def uri_to_path(uri: str) -> Path:
     s = str(uri or "").strip()
-    if s.startswith("file:"):
+    if s.lower().startswith("file:"):
         parsed = urlparse(s)
         raw = unquote(parsed.path)
-        if len(raw) > 2 and raw[0] == "/" and raw[2] == ":":
-            raw = raw[1:]
-        if parsed.netloc and parsed.netloc != "localhost":
+        if parsed.netloc and parsed.netloc.lower() != "localhost":
             raw = f"//{parsed.netloc}{raw}"
+        elif len(raw) > 2 and raw[0] == "/" and raw[2] == ":":
+            raw = raw[1:]
         return Path(raw).resolve()
     return Path(s).expanduser().resolve()
 
@@ -209,16 +223,41 @@ def detect_workspace_root(target: Path, spec: LanguageSpec, explicit_workspace: 
     return start_dir
 
 
+def _subprocess_kwargs() -> dict[str, Any]:
+    if os.name == "nt":
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        if flags:
+            return {"creationflags": flags}
+    return {}
+
+
 def resolve_python_interpreter(
     workspace_root: Path,
     explicit_python_path: str | None = None,
     target_file: Path | None = None,
 ) -> Path | None:
     """Resolve Python interpreter or venv directory without dereferencing venv bin/python symlinks."""
+    if os.name == "nt":
+        dir_candidates = (("Scripts", "python.exe"), ("python.exe",), ("bin", "python"), ("bin", "python3"))
+        rel_candidates = (
+            (".venv", "Scripts", "python.exe"),
+            ("venv", "Scripts", "python.exe"),
+            (".venv", "bin", "python"),
+            ("venv", "bin", "python"),
+        )
+    else:
+        dir_candidates = (("bin", "python"), ("bin", "python3"), ("Scripts", "python.exe"), ("python.exe",))
+        rel_candidates = (
+            (".venv", "bin", "python"),
+            ("venv", "bin", "python"),
+            (".venv", "Scripts", "python.exe"),
+            ("venv", "Scripts", "python.exe"),
+        )
+
     if explicit_python_path:
         raw = Path(os.path.abspath(os.path.expanduser(explicit_python_path.strip())))
         if raw.is_dir():
-            for rel in (("bin", "python"), ("bin", "python3"), ("Scripts", "python.exe"), ("python.exe",)):
+            for rel in dir_candidates:
                 cand = Path(os.path.abspath(raw.joinpath(*rel)))
                 if cand.is_file() and os.access(cand, os.X_OK):
                     return cand
@@ -229,12 +268,6 @@ def resolve_python_interpreter(
             raise ValueError(f"Invalid python_path executable name {raw.name!r} (expected python/python3): {raw}")
         return raw
 
-    rel_candidates = (
-        (".venv", "bin", "python"),
-        ("venv", "bin", "python"),
-        (".venv", "Scripts", "python.exe"),
-        ("venv", "Scripts", "python.exe"),
-    )
     search_roots: list[Path] = []
     ws_resolved = workspace_root.resolve()
     if target_file is not None:
@@ -268,16 +301,33 @@ def _build_augmented_env(workspace_root: Path, python_path: Path | None = None) 
     extra_dirs: list[Path] = []
     if python_path is not None:
         extra_dirs.append(python_path.parent)
-    extra_dirs.extend([
-        workspace_root / ".venv" / "bin",
-        workspace_root / "venv" / "bin",
-        workspace_root / ".venv" / "Scripts",
-        home / ".local" / "bin",
-        Path("/opt/homebrew/bin"),
-        Path("/usr/local/bin"),
-        home / "go" / "bin",
-        home / ".cargo" / "bin",
-    ])
+    if os.name == "nt":
+        extra_dirs.extend([
+            workspace_root / ".venv" / "Scripts",
+            workspace_root / "venv" / "Scripts",
+            home / ".local" / "bin",
+            home / "go" / "bin",
+            home / ".cargo" / "bin",
+        ])
+        appdata = env.get("APPDATA")
+        if appdata:
+            extra_dirs.append(Path(appdata) / "npm")
+        local_appdata = env.get("LOCALAPPDATA")
+        if local_appdata:
+            extra_dirs.append(Path(local_appdata) / "Programs" / "LLVM" / "bin")
+        program_files = env.get("ProgramFiles")
+        if program_files:
+            extra_dirs.append(Path(program_files) / "LLVM" / "bin")
+    else:
+        extra_dirs.extend([
+            workspace_root / ".venv" / "bin",
+            workspace_root / "venv" / "bin",
+            home / ".local" / "bin",
+            Path("/opt/homebrew/bin"),
+            Path("/usr/local/bin"),
+            home / "go" / "bin",
+            home / ".cargo" / "bin",
+        ])
     gopath = env.get("GOPATH")
     if gopath:
         extra_dirs.append(Path(gopath) / "bin")
@@ -286,19 +336,21 @@ def _build_augmented_env(workspace_root: Path, python_path: Path | None = None) 
         extra_dirs.append(Path(cargo_home) / "bin")
 
     existing = [p for p in env.get("PATH", "").split(os.pathsep) if p]
-    seen = set(existing)
+    seen = {os.path.normcase(p) for p in existing}
     prefix: list[str] = []
     for d in extra_dirs:
         s = str(d)
-        if s not in seen and d.is_dir():
+        norm = os.path.normcase(s)
+        if norm not in seen and d.is_dir():
             prefix.append(s)
-            seen.add(s)
+            seen.add(norm)
     env["PATH"] = os.pathsep.join(prefix + existing)
     return env
 
 
 def _resolve_lsp_command(spec: LanguageSpec, workspace_root: Path, env: dict[str, str]) -> list[str]:
     path_str = env.get("PATH", "")
+    sub_kwargs = _subprocess_kwargs()
     for binary, args in spec.candidates:
         found = shutil.which(binary, path=path_str)
         if found:
@@ -310,6 +362,7 @@ def _resolve_lsp_command(spec: LanguageSpec, workspace_root: Path, env: dict[str
                         capture_output=True,
                         timeout=5,
                         check=False,
+                        **sub_kwargs,
                     )
                     if probe.returncode != 0:
                         rustup = shutil.which("rustup", path=path_str)
@@ -321,6 +374,7 @@ def _resolve_lsp_command(spec: LanguageSpec, workspace_root: Path, env: dict[str
                                 text=True,
                                 timeout=5,
                                 check=False,
+                                **sub_kwargs,
                             )
                             if via.returncode == 0 and via.stdout.strip():
                                 found = via.stdout.strip()
@@ -343,7 +397,9 @@ def _find_fallback_tsserver(lsp_executable: str, env: dict[str, str]) -> str | N
     candidates: list[Path] = []
     try:
         resolved_bin = Path(lsp_executable).resolve()
-        # e.g. <prefix>/lib/node_modules/typescript-language-server/lib/cli.mjs
+        # Windows npm global shim: <prefix>\typescript-language-server.cmd beside node_modules\
+        candidates.append(resolved_bin.parent / "node_modules" / "typescript" / "lib" / "tsserver.js")
+        # POSIX npm global symlink target: <prefix>/lib/node_modules/typescript-language-server/lib/cli.mjs
         for ancestor in resolved_bin.parents:
             if ancestor.name == "node_modules":
                 candidates.append(ancestor / "typescript" / "lib" / "tsserver.js")
@@ -355,14 +411,23 @@ def _find_fallback_tsserver(lsp_executable: str, env: dict[str, str]) -> str | N
     if tsc_bin:
         try:
             tsc_resolved = Path(tsc_bin).resolve()
+            candidates.append(tsc_resolved.parent / "node_modules" / "typescript" / "lib" / "tsserver.js")
             candidates.append(tsc_resolved.parent.parent / "lib" / "tsserver.js")
         except OSError:
             pass
 
-    candidates.extend([
-        Path("/opt/homebrew/lib/node_modules/typescript/lib/tsserver.js"),
-        Path("/usr/local/lib/node_modules/typescript/lib/tsserver.js"),
-    ])
+    if os.name == "nt":
+        appdata = env.get("APPDATA")
+        if appdata:
+            candidates.append(Path(appdata) / "npm" / "node_modules" / "typescript" / "lib" / "tsserver.js")
+        program_files = env.get("ProgramFiles")
+        if program_files:
+            candidates.append(Path(program_files) / "nodejs" / "node_modules" / "typescript" / "lib" / "tsserver.js")
+    else:
+        candidates.extend([
+            Path("/opt/homebrew/lib/node_modules/typescript/lib/tsserver.js"),
+            Path("/usr/local/lib/node_modules/typescript/lib/tsserver.js"),
+        ])
     for cand in candidates:
         if cand.is_file():
             return str(cand)
@@ -441,6 +506,7 @@ class LspSession:
                 stderr=subprocess.PIPE,
                 cwd=str(self.workspace_root),
                 env=self.env,
+                **_subprocess_kwargs(),
             )
             threading.Thread(target=self._stdout_loop, name=f"lsp-out-{self.spec.lang_key}", daemon=True).start()
             threading.Thread(target=self._stderr_loop, name=f"lsp-err-{self.spec.lang_key}", daemon=True).start()
@@ -521,8 +587,8 @@ class LspSession:
             try:
                 proc.stdin.write(header + body)
                 proc.stdin.flush()
-            except BrokenPipeError as exc:
-                raise LspProtocolError(f"Broken pipe writing to {self.server_name}") from exc
+            except OSError as exc:
+                raise LspProtocolError(f"Broken pipe writing to {self.server_name}: {exc}") from exc
 
     def notify(self, method: str, params: Any) -> None:
         self.last_used = time.monotonic()
@@ -849,7 +915,19 @@ class LspSession:
                 try:
                     proc.wait(timeout=1.5)
                 except subprocess.TimeoutExpired:
-                    proc.kill()
+                    if os.name == "nt":
+                        try:
+                            subprocess.run(
+                                ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                                capture_output=True,
+                                timeout=5,
+                                check=False,
+                                **_subprocess_kwargs(),
+                            )
+                        except (OSError, subprocess.TimeoutExpired):
+                            proc.kill()
+                    else:
+                        proc.kill()
                     try:
                         proc.wait(timeout=1.0)
                     except subprocess.TimeoutExpired:

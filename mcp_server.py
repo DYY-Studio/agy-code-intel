@@ -23,6 +23,7 @@ from lsp_manager import (
     LspProtocolError,
     LspSession,
     LspUnavailableError,
+    is_file_uri_or_path,
     path_to_uri,
     py_col_to_utf16,
     uri_to_path,
@@ -223,12 +224,14 @@ def _fetch_document_symbols(
                 raw_name = str(item.get("name") or "").strip()
                 container = str(item.get("containerName") or "").strip()
                 qname = f"{container}.{raw_name}" if container else raw_name
+                loc_uri = str(loc.get("uri") or "")
+                sym_file = uri_to_path(loc_uri) if is_file_uri_or_path(loc_uri) else resolved
                 out.append(
                     FlatSymbol(
                         name=raw_name,
                         qualified_name=qname,
                         kind=int(item.get("kind") or 0),
-                        file_path=uri_to_path(str(loc.get("uri") or path_to_uri(resolved))),
+                        file_path=sym_file,
                         range_start_line=int(r_start),
                         range_end_line=int(r_end),
                         sel_line=int(r_start),
@@ -393,7 +396,7 @@ def _normalize_locations(raw: Any) -> list[tuple[Path, int, int]]:
         else:
             uri = str(item.get("uri") or "")
             rng = item.get("range") or {}
-        if not uri:
+        if not is_file_uri_or_path(uri):
             continue
         fpath = uri_to_path(uri)
         start = rng.get("start") or {}
@@ -437,7 +440,9 @@ def _prepare_call_hierarchy(
     )
     if not isinstance(raw, list):
         return []
-    return [item for item in raw if isinstance(item, dict) and item.get("uri")]
+    return [
+        item for item in raw if isinstance(item, dict) and is_file_uri_or_path(str(item.get("uri") or ""))
+    ]
 
 
 def _item_key(item: dict[str, Any]) -> tuple[Path, int, int, str]:
@@ -465,7 +470,7 @@ def _python_env_tag(session: LspSession) -> str:
         return ", python=default"
     py_str = str(session.python_path)
     ws_prefix = str(session.workspace_root) + os.sep
-    if py_str.startswith(ws_prefix):
+    if os.path.normcase(py_str).startswith(os.path.normcase(ws_prefix)):
         py_str = py_str[len(ws_prefix) :]
     return f", python={py_str}"
 
@@ -555,7 +560,7 @@ def tool_locate_symbol(args: dict[str, Any]) -> str:
             qname = f"{container}.{name}" if container else name
             loc = item.get("location") or {}
             uri = str(loc.get("uri") or item.get("uri") or "")
-            if not uri:
+            if not is_file_uri_or_path(uri):
                 continue
             fpath = uri_to_path(uri)
             if not _is_within_workspace(fpath, ws_root):
@@ -670,6 +675,8 @@ def tool_find_callers(args: dict[str, Any]) -> str:
                 if not isinstance(entry, dict) or not isinstance(entry.get("from"), dict):
                     continue
                 caller = entry["from"]
+                if not is_file_uri_or_path(str(caller.get("uri") or "")):
+                    continue
                 caller_key = _item_key(caller)
                 caller_file, caller_l0, _, caller_name = caller_key
                 caller_kind = SYMBOL_KINDS.get(int(caller.get("kind") or 0), "Symbol")
@@ -816,6 +823,8 @@ def tool_find_callees(args: dict[str, Any]) -> str:
             if not isinstance(entry, dict) or not isinstance(entry.get("to"), dict):
                 continue
             callee = entry["to"]
+            if not is_file_uri_or_path(str(callee.get("uri") or "")):
+                continue
             callee_key = _item_key(callee)
             callee_file, callee_l0, _, callee_name = callee_key
             callee_kind = SYMBOL_KINDS.get(int(callee.get("kind") or 0), "Symbol")
@@ -1175,7 +1184,7 @@ def main() -> None:
     if hasattr(sys.stdin, "reconfigure"):
         sys.stdin.reconfigure(encoding="utf-8", errors="replace")
     if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace", newline="\n")
     try:
         for raw_line in sys.stdin:
             line = raw_line.strip()

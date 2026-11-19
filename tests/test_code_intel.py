@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -12,6 +13,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from lsp_manager import (
+    _find_fallback_tsserver,
+    is_file_uri_or_path,
     path_to_uri,
     py_col_to_utf16,
     resolve_python_interpreter,
@@ -20,20 +23,36 @@ from lsp_manager import (
 )
 
 
+def _search_path_for_test() -> str:
+    extra = [str(Path.home() / ".local" / "bin")]
+    if os.name != "nt":
+        extra.extend(["/opt/homebrew/bin", "/usr/local/bin"])
+    existing = os.environ.get("PATH", "")
+    return os.pathsep.join([*extra, existing]) if existing else os.pathsep.join(extra)
+
+
 class UnitHelpersTest(unittest.TestCase):
     def test_python_interpreter_resolution_and_validation(self) -> None:
         with tempfile.TemporaryDirectory(prefix="code_intel_venv_") as tmp:
             ws = Path(tmp).resolve()
-            sub_py = ws / "plugins" / "ocr" / ".venv" / "bin" / "python"
-            sub_py.parent.mkdir(parents=True)
-            sub_py.symlink_to(sys.executable)
+            if os.name == "nt":
+                sub_py = ws / "plugins" / "ocr" / ".venv" / "Scripts" / "python.exe"
+                sub_py.parent.mkdir(parents=True)
+                try:
+                    sub_py.symlink_to(sys.executable)
+                except OSError:
+                    sub_py.write_bytes(b"")
+            else:
+                sub_py = ws / "plugins" / "ocr" / ".venv" / "bin" / "python"
+                sub_py.parent.mkdir(parents=True)
+                sub_py.symlink_to(sys.executable)
             target = ws / "plugins" / "ocr" / "worker.py"
             target.write_text("x = 1\n", encoding="utf-8")
 
             # Preserves symlink path inside sub-plugin .venv rather than dereferencing to system python
             auto_py = resolve_python_interpreter(ws, None, target)
             self.assertEqual(auto_py, sub_py)
-            # Explicit venv directory resolves to bin/python inside it
+            # Explicit venv directory resolves to interpreter inside it
             self.assertEqual(resolve_python_interpreter(ws, str(sub_py.parent.parent)), sub_py)
             # Rejects non-python executable names
             bad = ws / "not_python.sh"
@@ -41,6 +60,27 @@ class UnitHelpersTest(unittest.TestCase):
             bad.chmod(0o755)
             with self.assertRaises(ValueError):
                 resolve_python_interpreter(ws, str(bad))
+
+    def test_fallback_tsserver_discovers_windows_npm_sibling_layout(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="code_intel_npm_") as tmp:
+            npm_dir = Path(tmp).resolve()
+            shim = npm_dir / "typescript-language-server.cmd"
+            shim.write_text("@echo off\r\n", encoding="utf-8")
+            tsserver = npm_dir / "node_modules" / "typescript" / "lib" / "tsserver.js"
+            tsserver.parent.mkdir(parents=True)
+            tsserver.write_text("// stub\n", encoding="utf-8")
+
+            found = _find_fallback_tsserver(str(shim), {"PATH": ""})
+            self.assertEqual(found, str(tsserver))
+
+    def test_uri_scheme_filtering(self) -> None:
+        self.assertTrue(is_file_uri_or_path("file:///tmp/example.py"))
+        self.assertTrue(is_file_uri_or_path("FILE:///c%3A/repo/app.py"))
+        self.assertTrue(is_file_uri_or_path(r"C:\repo\app.py"))
+        self.assertFalse(is_file_uri_or_path(""))
+        self.assertFalse(is_file_uri_or_path("untitled:Untitled-1"))
+        self.assertFalse(is_file_uri_or_path("deno:///asset/lib.d.ts"))
+
     def test_utf16_column_roundtrip_with_cjk_and_emoji(self) -> None:
         line = 'prefix = "中文😀" + target_fn(x)'
         py_idx = line.index("target_fn")
@@ -60,7 +100,7 @@ class UnitHelpersTest(unittest.TestCase):
 
 
 @unittest.skipUnless(
-    shutil.which("basedpyright-langserver", path=f"{Path.home() / '.local/bin'}:/opt/homebrew/bin:/usr/local/bin"),
+    shutil.which("basedpyright-langserver", path=_search_path_for_test()),
     "basedpyright-langserver not installed",
 )
 class EndToEndMcpFlowTest(unittest.TestCase):

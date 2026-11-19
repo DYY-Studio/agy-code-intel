@@ -26,17 +26,18 @@ Unlike raw `rg` text searches—which miss aliased imports, polymorphic method r
 | Language | Extensions | Language Server Binary | Install Command |
 | :--- | :--- | :--- | :--- |
 | **Python** | `.py`, `.pyi` | `basedpyright-langserver` / `pyright-langserver` | `uv tool install basedpyright` |
-| **TypeScript / JS** | `.ts`, `.tsx`, `.mts`, `.cts`, `.js`, `.jsx`, `.mjs`, `.cjs` | `typescript-language-server` / `vtsls` | `npm install -g 'typescript@^6' typescript-language-server` |
+| **TypeScript / JS** | `.ts`, `.tsx`, `.mts`, `.cts`, `.js`, `.jsx`, `.mjs`, `.cjs` | `typescript-language-server` / `vtsls` | `npm install -g "typescript@^6" typescript-language-server` |
 | **Go** | `.go` | `gopls` | `go install golang.org/x/tools/gopls@latest` |
 | **Rust** | `.rs` | `rust-analyzer` | `rustup component add rust-analyzer` |
-| **C / C++** | `.c`, `.h`, `.cc`, `.cpp`, `.cxx`, `.hpp`, `.hh` | `clangd` | Xcode Command Line Tools / `brew install llvm` |
+| **C / C++** | `.c`, `.h`, `.cc`, `.cpp`, `.cxx`, `.hpp`, `.hh` | `clangd` | macOS: Xcode CLT / `brew install llvm`; Linux: `apt`/`dnf install clangd`; Windows: `winget install LLVM.LLVM` |
 | **Swift** | `.swift` | `sourcekit-lsp` | Xcode / Swift Toolchain |
 
 ## Installation
 
-1. Clone or symlink into your Antigravity plugins folder:
+1. Clone, copy, or link into your Antigravity plugins folder (`~/.gemini/config/plugins/code-intel`, or `%USERPROFILE%\.gemini\config\plugins\code-intel` on Windows):
 
    ```bash
+   # macOS / Linux
    ln -s /path/to/code-intel ~/.gemini/config/plugins/code-intel
    ```
 
