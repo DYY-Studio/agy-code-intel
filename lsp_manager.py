@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import subprocess
 import threading
 import time
@@ -315,7 +316,7 @@ def _build_augmented_env(workspace_root: Path, python_path: Path | None = None) 
         local_appdata = env.get("LOCALAPPDATA")
         if local_appdata:
             extra_dirs.append(Path(local_appdata) / "Programs" / "LLVM" / "bin")
-        program_files = env.get("ProgramFiles")
+        program_files = env.get("PROGRAMFILES") or env.get("ProgramFiles")
         if program_files:
             extra_dirs.append(Path(program_files) / "LLVM" / "bin")
     else:
@@ -420,7 +421,7 @@ def _find_fallback_tsserver(lsp_executable: str, env: dict[str, str]) -> str | N
         appdata = env.get("APPDATA")
         if appdata:
             candidates.append(Path(appdata) / "npm" / "node_modules" / "typescript" / "lib" / "tsserver.js")
-        program_files = env.get("ProgramFiles")
+        program_files = env.get("PROGRAMFILES") or env.get("ProgramFiles")
         if program_files:
             candidates.append(Path(program_files) / "nodejs" / "node_modules" / "typescript" / "lib" / "tsserver.js")
     else:
@@ -499,6 +500,9 @@ class LspSession:
         with self._op_lock:
             if self.is_alive():
                 return
+            popen_kwargs = _subprocess_kwargs()
+            if os.name != "nt":
+                popen_kwargs["start_new_session"] = True
             self._proc = subprocess.Popen(
                 self.cmd,
                 stdin=subprocess.PIPE,
@@ -506,7 +510,7 @@ class LspSession:
                 stderr=subprocess.PIPE,
                 cwd=str(self.workspace_root),
                 env=self.env,
-                **_subprocess_kwargs(),
+                **popen_kwargs,
             )
             threading.Thread(target=self._stdout_loop, name=f"lsp-out-{self.spec.lang_key}", daemon=True).start()
             threading.Thread(target=self._stderr_loop, name=f"lsp-err-{self.spec.lang_key}", daemon=True).start()
@@ -927,10 +931,19 @@ class LspSession:
                         except (OSError, subprocess.TimeoutExpired):
                             proc.kill()
                     else:
-                        proc.kill()
+                        try:
+                            os.killpg(proc.pid, signal.SIGKILL)
+                        except OSError:
+                            proc.kill()
                     try:
                         proc.wait(timeout=1.0)
                     except subprocess.TimeoutExpired:
+                        pass
+            for stream in (proc.stdin, proc.stdout, proc.stderr):
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except OSError:
                         pass
 
 

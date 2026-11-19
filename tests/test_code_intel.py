@@ -25,7 +25,11 @@ from lsp_manager import (
 
 def _search_path_for_test() -> str:
     extra = [str(Path.home() / ".local" / "bin")]
-    if os.name != "nt":
+    if os.name == "nt":
+        appdata = os.environ.get("APPDATA")
+        if appdata:
+            extra.append(str(Path(appdata) / "npm"))
+    else:
         extra.extend(["/opt/homebrew/bin", "/usr/local/bin"])
     existing = os.environ.get("PATH", "")
     return os.pathsep.join([*extra, existing]) if existing else os.pathsep.join(extra)
@@ -72,6 +76,18 @@ class UnitHelpersTest(unittest.TestCase):
 
             found = _find_fallback_tsserver(str(shim), {"PATH": ""})
             self.assertEqual(found, str(tsserver))
+
+            if os.name == "nt":
+                pf_ts = npm_dir / "pf" / "nodejs" / "node_modules" / "typescript" / "lib" / "tsserver.js"
+                pf_ts.parent.mkdir(parents=True)
+                pf_ts.write_text("// stub\n", encoding="utf-8")
+                self.assertEqual(
+                    _find_fallback_tsserver(
+                        str(npm_dir / "isolated" / "missing.cmd"),
+                        {"PATH": "", "PROGRAMFILES": str(npm_dir / "pf")},
+                    ),
+                    str(pf_ts),
+                )
 
     def test_uri_scheme_filtering(self) -> None:
         self.assertTrue(is_file_uri_or_path("file:///tmp/example.py"))
